@@ -3,7 +3,7 @@ title: "Proyecto Bioinformática: Expresión Diferencial en DLBC (TCGA) y Análi
 author: "Pedro Daniel Pineda Martínez"
 output: 
   html_document:
-    theme: flatly
+    theme: yeti
     toc: true
     toc_float: true
 ---
