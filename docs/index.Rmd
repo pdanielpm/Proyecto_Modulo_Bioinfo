@@ -1,0 +1,383 @@
+---
+title: "Proyecto Bioinformática: Expresión Diferencial en DLBC (TCGA) y Análisis de SPN/CD43 con limma-voom"
+author: "Pedro Daniel Pineda Martínez"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+---
+
+# Introducción
+
+El linfoma difuso de células B grandes (DLBCL) es la neoplasia linfoide agresiva más frecuente en adultos y se caracteriza por una marcada heterogeneidad biológica y clínica. Estudios de perfilamiento transcriptómico han demostrado que, aun dentro de una misma categoría histopatológica, existen programas de expresión génica distintos asociados con el estado de diferenciación de la célula tumoral, la proliferación y la respuesta del hospedero, los cuales impactan el pronóstico. En particular, la clasificación por “cell-of-origin” (p. ej., GCB vs ABC) y firmas transcriptómicas relacionadas con microambiente e inmunidad ayudan a explicar parte de la variación interpaciente y su relación con la supervivencia. [Alizadeh et al., 2000; Rosenwald et al., 2002; Chapuy et al., 2018]. 
+
+En este documento se analiza expresión diferencial a partir de datos públicos de RNA-seq del consorcio TCGA, accesibles vía recount3, comparando pacientes *alive* vs *dead*. Además, se explora el comportamiento del gen **SPN** (que codifica CD43/sialoforina), dada la evidencia de que CD43 puede contribuir a fenotipos pro-tumorales en distintos contextos (adhesión, crecimiento y señalización) y, de manera relevante para DLBCL, su expresión inmunohistoquímica se ha asociado con peores desenlaces clínicos.  
+
+**Importancia de CD43 (SPN).** CD43 es una sialomucina transmembranal abundante en células hematopoyéticas, pero también se ha descrito su expresión/función en contextos tumorales y su potencial contribución a procesos como adhesión célula–mesotelio y crecimiento tumoral. En DLBCL, varios estudios reportan que CD43 positivo se asocia con menores tasas de respuesta completa y menor supervivencia global/event-free, y que coexpresión CD5/CD43 identifica subgrupos particularmente adversos.  
+
+# Objetivo
+
+1) Identificar genes diferencialmente expresados entre *alive* vs *dead* en el proyecto **DLBC** (TCGA/recount3) usando **edgeR**.  
+2) Visualizar los resultados (volcán, MA, heatmap de genes más variables).  
+3) Evaluar **SPN/CD43**: distribución por estado vital, asociación con supervivencia (Kaplan–Meier) y su relación con la variación transcriptómica global.
+
+# Métodos
+
+```{r setup1, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 9, fig.height = 5
+)
+
+suppressPackageStartupMessages({
+  library(recount3)
+  library(SummarizedExperiment)
+  library(Matrix)
+
+  library(edgeR)
+  library(limma)
+  library(ggplot2)
+  library(ggpubr)
+  library(matrixStats)
+  library(pheatmap)
+
+  library(survival)
+  library(survminer)
+})
+```
+
+### Descarga y construcción del RSE (DLBC)
+```{r}
+human_projects <- available_projects()
+
+project_info <- subset(
+  human_projects,
+  project == "DLBC" &
+    project_type == "data_sources" &
+    project_home == "data_sources/tcga"
+)
+
+rse_DLBC <- create_rse(project_info)
+
+assay(rse_DLBC, "counts") <- compute_read_counts(rse_DLBC)
+
+
+cts <- assay(rse_DLBC, "counts")
+cd <- as.data.frame(colData(rse_DLBC))
+rd <- as.data.frame(rowData(rse_DLBC))
+
+cat("Muestras iniciales:", ncol(cts), "\n")
+cat("Genes iniciales:", nrow(cts), "\n")
+
+```
+
+### Filtrado: vital_status + QC de conteos + filtro de genes
+```{r}
+## --- detectar columna de estado vital 
+vital_candidates <- grep(
+  "vital|vital_status|deceased|dead|alive",
+  names(cd),
+  ignore.case = TRUE,
+  value = TRUE
+)
+
+if (length(vital_candidates) == 0) {
+  stop(
+    "No se encontraron columnas tipo vital_status en colData(). Revisa names(cd)."
+  )
+}
+
+# Elegir la columna más informativa (por defecto, la primera)
+vital_col <- vital_candidates[1]
+cat("Usando columna vital:", vital_col, "\n")
+print(table(cd[[vital_col]], useNA = "ifany"))
+
+## --- remover NA / unknown / not reported
+bad_vital <- is.na(cd[[vital_col]]) |
+  trimws(tolower(as.character(cd[[vital_col]]))) %in%
+    c("", "na", "nan", "not reported", "unknown")
+
+keep_vital <- !bad_vital
+
+rse_vital <- rse_DLBC[, keep_vital]
+cts_vital <- assay(rse_vital, "counts")
+cd_vital <- as.data.frame(colData(rse_vital))
+
+cat("Muestras tras filtrar vital:", ncol(cts_vital), "\n")
+print(table(cd_vital[[vital_col]], useNA = "ifany"))
+
+## --- QC por muestra
+lib_size <- Matrix::colSums(cts_vital)
+genes_det <- Matrix::colSums(cts_vital > 0)
+zero_frac <- Matrix::colMeans(cts_vital == 0)
+
+qc <- data.frame(
+  sample = colnames(cts_vital),
+  lib_size = as.numeric(lib_size),
+  genes_detected = as.numeric(genes_det),
+  zero_fraction = as.numeric(zero_frac)
+)
+
+summary(qc)
+
+min_lib <- 5e6
+min_genes <- 10000
+max_zeros <- 0.85
+
+keep_qc <- with(
+  qc,
+  lib_size >= min_lib & genes_detected >= min_genes & zero_fraction <= max_zeros
+)
+cat("Muestras que pasan QC:", sum(keep_qc), "de", length(keep_qc), "\n")
+
+rse_qc <- rse_vital[, keep_qc]
+cts_qc <- assay(rse_qc, "counts")
+
+## --- filtro de genes (>=10 counts en >=10% de muestras)
+n <- ncol(cts_qc)
+keep_gene <- Matrix::rowSums(cts_qc >= 10) >= ceiling(0.10 * n)
+
+rse_filt <- rse_qc[keep_gene, ]
+cts_final <- assay(rse_filt, "counts")
+coldata_final <- as.data.frame(colData(rse_filt))
+rowdata_final <- as.data.frame(rowData(rse_filt))
+
+cat("Genes finales:", nrow(cts_final), "\n")
+cat("Muestras finales:", ncol(cts_final), "\n")
+
+```
+
+# Resultados
+
+### Expresión diferencial Alive vs Dead con limma-voom (edgeR)
+
+```{r}
+v <- tolower(trimws(as.character(coldata_final[[vital_col]])))
+
+group <- ifelse(
+  v %in% c("alive", "living"),
+  "alive",
+  ifelse(v %in% c("dead", "deceased"), "dead", NA)
+)
+
+keep_ad <- !is.na(group)
+cts_ad <- cts_final[, keep_ad]
+cd_ad <- coldata_final[keep_ad, , drop = FALSE]
+group <- factor(group[keep_ad], levels = c("alive", "dead"))
+
+cat("Tabla alive/dead:\n")
+print(table(group))
+
+
+y <- DGEList(counts = cts_ad, group = group)
+keep_gene2 <- filterByExpr(y, group = group)
+y <- y[keep_gene2, , keep.lib.sizes = FALSE]
+y <- calcNormFactors(y, method = "TMM")
+
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+
+v <- voom(y, design, plot = TRUE)
+
+
+fit <- lmFit(v, design)
+
+
+# contraste: dead vs alive (logFC>0 => más alto en dead)
+contr <- makeContrasts(DeadVsAlive = dead - alive, levels = design)
+fit.contr <- contrasts.fit(fit, contr)
+
+fit.eb <- eBayes(fit.contr)
+res <- topTable(fit.eb, coef = "DeadVsAlive", number = Inf, sort.by = "P")
+
+## --- anotar símbolo si existe
+gene_col_candidates <- intersect(
+  c("gene_name", "gene", "symbol", "external_gene_name"),
+  colnames(rowdata_final)
+)
+gene_col <- if (length(gene_col_candidates) > 0) {
+  gene_col_candidates[1]
+} else {
+  NULL
+}
+
+res$gene <- if (!is.null(gene_col)) {
+  rowdata_final[[gene_col]][match(rownames(res), rownames(rowdata_final))]
+} else {
+  NA_character_
+}
+
+head(res, 20)
+
+```
+
+##### Volcano Plot
+```{r}
+
+volcanoplot(
+  fit.eb,
+  coef = "DeadVsAlive",
+  highlight = 100,
+  names = res$gene,
+)
+
+A <- res$AveExpr
+M <- res$logFC
+
+```
+
+##### MA Plot
+```{r}
+
+plot(
+  A,
+  M,
+  pch = 16,
+  cex = 0.45,
+  xlab = "Average expression (logCPM)",
+  ylab = "logFC (dead vs alive)",
+  ylim = c(-5, 5)
+)
+abline(h = 0, col = "red")
+
+```
+
+##### Heatmap
+```{r}
+logcpm <- v$E
+
+top_n <- 20
+vars <- matrixStats::rowVars(logcpm)
+top_idx <- order(vars, decreasing = TRUE)[seq_len(min(top_n, nrow(logcpm)))]
+mat <- logcpm[top_idx, , drop = FALSE]
+
+## renombrar filas con símbolo si existe
+if (!is.null(gene_col)) {
+  labs <- rowdata_final[[gene_col]][match(
+    rownames(mat),
+    rownames(rowdata_final)
+  )]
+  labs[is.na(labs) | labs == ""] <- rownames(mat)[is.na(labs) | labs == ""]
+  rownames(mat) <- make.unique(labs)
+}
+
+## anotar columnas
+ann_col <- data.frame(vital_status = group)
+rownames(ann_col) <- colnames(mat)
+
+## ordenar por grupo
+ord <- order(group)
+mat <- mat[, ord, drop = FALSE]
+ann_col <- ann_col[ord, , drop = FALSE]
+
+pheatmap(
+  mat,
+  scale = "row",
+  show_colnames = FALSE,
+  annotation_col = ann_col,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  main = paste0(
+    "Top ",
+    top_n,
+    " genes más variables (logCPM; z-score por gen)"
+  ),
+)
+```
+
+### SPN (CD43): distribución, supervivencia y relación con transcriptoma global
+
+##### Violin plot SPN vs estado vital
+```{r}
+## localizar SPN por símbolo
+if (is.null(gene_col)) {
+  stop("No hay columna de símbolo en rowData para ubicar SPN.")
+}
+
+spn_row <- which(rowdata_final[[gene_col]] == "SPN")
+if (length(spn_row) == 0) {
+  stop("SPN no encontrado en rowData (símbolos).")
+}
+
+SPN_expr <- as.numeric(logcpm[spn_row, ])
+
+df_spn <- data.frame(
+  status = group,
+  expr = SPN_expr
+)
+df_spn <- df_spn[!is.na(df_spn$status), ]
+
+violinplt <- ggplot(df_spn, aes(status, expr, fill = status)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.10, alpha = 0.6, size = 1.2) +
+  stat_compare_means(method = "wilcox.test") +
+  theme_classic() +
+  labs(
+    title = "Expresión de SPN (CD43) vs estado vital",
+    y = "logCPM (TMM)",
+    x = ""
+  )
+
+print(violinplt)
+
+```
+
+##### Supervivencia (Kaplan–Meier) por SPN High vs Low
+```{r}
+d_death <- suppressWarnings(as.numeric(as.character(
+  coldata_final$tcga.gdc_cases.diagnoses.days_to_death
+)))
+d_fu <- suppressWarnings(as.numeric(as.character(
+  coldata_final$tcga.gdc_cases.diagnoses.days_to_last_follow_up
+)))
+
+time <- ifelse(!is.na(d_death), d_death, d_fu)
+event <- ifelse(group == "dead", 1, 0)
+
+expr_group <- ifelse(SPN_expr > median(SPN_expr, na.rm = TRUE), "High", "Low")
+expr_group <- factor(expr_group, levels = c("Low", "High"))
+
+surv_df <- data.frame(
+  time = as.numeric(time),
+  event = as.integer(event),
+  expr_group = expr_group
+)
+
+surv_df <- surv_df[complete.cases(surv_df), ]
+surv_df <- surv_df[surv_df$time >= 0, ]
+
+fit <- survfit(Surv(time, event) ~ expr_group, data = surv_df)
+
+surv_plot <- ggsurvplot(
+  fit,
+  data = surv_df,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE,
+  ggtheme = theme_classic(),
+  title = "Overall survival por SPN (High vs Low)"
+)
+```
+
+##### SPN vs transcriptome variation
+```{r}
+pca <- prcomp(t(logcpm), scale. = TRUE)
+
+df_pc <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  SPN = SPN_expr,
+  status = group
+)
+
+ggplot(df_pc, aes(SPN, PC1, color = status)) +
+  geom_point(size = 2.7) +
+  theme_classic() +
+  labs(
+    title = "Relación entre SPN y el eje principal de variación transcriptómica (PC1)",
+    x = "SPN (logCPM)",
+    y = "PC1"
+  )
+```
