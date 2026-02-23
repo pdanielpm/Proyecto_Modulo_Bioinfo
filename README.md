@@ -18,14 +18,12 @@ Además, se explora el comportamiento del gen SPN (que codifica CD43/sialoforina
   library(recount3)
   library(SummarizedExperiment)
   library(Matrix)
-
   library(edgeR)
   library(limma)
   library(ggplot2)
   library(ggpubr)
   library(matrixStats)
   library(pheatmap)
-
   library(survival)
   library(survminer)
 
