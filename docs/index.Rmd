@@ -359,6 +359,8 @@ surv_plot <- ggsurvplot(
   ggtheme = theme_classic(),
   title = "Overall survival por SPN (High vs Low)"
 )
+
+print(surv_plot)
 ```
 
 ##### SPN vs transcriptome variation
@@ -381,3 +383,17 @@ ggplot(df_pc, aes(SPN, PC1, color = status)) +
     y = "PC1"
   )
 ```
+
+# Discusión y conclusión
+
+En este análisis (DLBC/TCGA vía recount3), la comparación alive vs dead con limma identifica un conjunto de genes con evidencia de expresión diferencial (visualizable en el volcán y el MA). Aun cuando el desenlace clínico final está influido por múltiples covariables (edad, IPI, tratamiento, subtipo molecular, carga tumoral, etc.), estos resultados ofrecen un punto de partida para formular hipótesis sobre programas de expresión asociados a mortalidad en este cohorte.
+
+Los genes de mayor variabilidad en DLBCL suelen agruparse en categorías biológicamente esperables:
+
+Genes ligados a sexo (p. ej., XIST/TSIX y genes del cromosoma Y como RPS4Y1, EIF1AY, UTY, DDX3Y, KDM5D), que reflejan una fuente fuerte de variación inter-individuo no necesariamente tumoral.
+
+Genes de inmunoglobulinas/BCR (p. ej., segmentos IGHV/IGKV/IGLV o genes asociados a plasmablastos), que capturan heterogeneidad de la identidad B, estado de activación y/o composición tumoral–microambiente.
+
+Antígenos de cancer testicular o programas de proliferación/estrés, que pueden emerger en subgrupos específicos y son consistentes con la heterogeneidad molecular descrita en DLBCL por estudios de perfilamiento transcriptómico y genómico. En conjunto, este patrón concuerda con que DLBCL no es una entidad homogénea, sino un espectro de estados biológicos con consecuencias pronósticas.
+
+SPN no muestra una diferencia marcada entre alive y dead (p=0.48 por Wilcoxon) y la separación por mediana para Kaplan–Meier tampoco produce una diferencia significativa (p=0.48). Sin embargo, la relación entre SPN y el eje principal de variación transcriptómica (PC1) sugiere que SPN podría estar asociado a un programa biológico relevante, aunque no necesariamente ligado al desenlace vital en este cohorte específico. Dado que CD43 ha sido reportado como un marcador de peor pronóstico en DLBCL, es posible que su expresión esté relacionada con características biológicas que influyen en la supervivencia, aunque no se haya observado una diferencia estadísticamente significativa en este análisis. Sin embargo, hay evidencia de roles pro-tumorales de CD43 en adhesión/crecimiento y, específicamente en DLBCL, se ha reportado que CD43 positivo se asocia con peor EFS/OS; además, la coexpresión CD5/CD43 define un subgrupo de pronóstico especialmente adverso.
